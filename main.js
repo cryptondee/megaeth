@@ -120,41 +120,86 @@ async function main() {
   }
 
   const numWallets = wallets.length;
-  const transactionsPerWalletBase = Math.floor(TOTAL_TX / numWallets);
-  let remainingTransactions = TOTAL_TX % numWallets;
-
-  console.log(`Distributing ${TOTAL_TX} transactions across ${numWallets} wallets.`);
-  console.log(`Base transactions per wallet: ${transactionsPerWalletBase}`);
-  if (remainingTransactions > 0) {
-    console.log(`${remainingTransactions} wallets will handle one extra transaction.`);
-  }
-
   const promises = [];
   let totalOverallSuccess = 0;
   let totalOverallFailed = 0;
 
   console.time("totalExecutionTime");
 
+  // Step 1: Fetch all initial nonces in parallel
+  console.log("Fetching initial nonces for all wallets in parallel...");
+  const noncePromises = wallets.map(wallet => 
+    provider.getTransactionCount(wallet.address, "pending")
+      .catch(err => { // Add error handling for individual nonce fetches
+        console.error(`Failed to fetch nonce for wallet ${wallet.address}: ${err.message}. This wallet will be skipped.`);
+        return -1; // Indicator of failure, so Promise.all doesn't reject outright
+      })
+  );
+  const initialNoncesUnfiltered = await Promise.all(noncePromises);
+  console.log("All initial nonce fetch attempts completed.");
+
+  // Filter out wallets for which nonce fetching failed and prepare data for processing
+  const walletProcessingData = [];
   for (let i = 0; i < numWallets; i++) {
-    const currentWallet = wallets[i]; // Renamed to avoid conflict if 'wallet' is used elsewhere
-    const initialNonce = await provider.getTransactionCount(currentWallet.address, "pending");
-    console.log(`Wallet ${i} (${currentWallet.address}) initial nonce: ${initialNonce}`);
+    if (initialNoncesUnfiltered[i] === -1) { // Check for failure indicator
+      // Error already logged in the catch block above
+      continue;
+    }
+    walletProcessingData.push({
+      wallet: wallets[i],
+      initialNonce: initialNoncesUnfiltered[i],
+      walletIdOriginalIndex: i // Keep original index for logging
+    });
+  }
+  
+  // Recalculate transactions per wallet based on successfully prepared wallets
+  const numProcessableWallets = walletProcessingData.length;
+  if (numProcessableWallets === 0 && TOTAL_TX > 0) {
+    console.error("No wallets could be prepared for transaction processing (e.g., all nonce fetches failed or no wallets initially). Halting.");
+    console.timeEnd("totalExecutionTime");
+    return;
+  }
+  
+  // Initialize transaction distribution variables only if there are processable wallets
+  let transactionsPerWalletBase = 0;
+  let remainingTransactions = 0;
+
+  if (numProcessableWallets > 0) {
+    transactionsPerWalletBase = Math.floor(TOTAL_TX / numProcessableWallets);
+    remainingTransactions = TOTAL_TX % numProcessableWallets;
+    console.log(`Distributing ${TOTAL_TX} transactions across ${numProcessableWallets} processable wallets.`);
+    console.log(`Base transactions per wallet: ${transactionsPerWalletBase}`);
+    if (remainingTransactions > 0) {
+      console.log(`${remainingTransactions} wallets will handle one extra transaction.`);
+    }
+  } else if (TOTAL_TX > 0) {
+    // This case means TOTAL_TX > 0 but no wallets to process them.
+    console.warn(`There are ${TOTAL_TX} transactions to send but no wallets are available for processing.`);
+  } else {
+    // TOTAL_TX is 0 or less, no transactions to send.
+    console.log("No transactions targeted (TOTAL_TX is 0 or less).");
+  }
+
+  // Step 2: Prepare and push transaction processing promises
+  for (let i = 0; i < numProcessableWallets; i++) {
+    const { wallet: currentWallet, initialNonce, walletIdOriginalIndex } = walletProcessingData[i];
+    
+    console.log(`Wallet index ${walletIdOriginalIndex} (${currentWallet.address}) using pre-fetched initial nonce: ${initialNonce}`);
     
     let txForThisWallet = transactionsPerWalletBase + (remainingTransactions > 0 ? 1 : 0);
     if (remainingTransactions > 0) remainingTransactions--;
 
+    // If, after distribution, a wallet gets 0 tx but TOTAL_TX was > 0, log and skip.
+    // This is mainly a safeguard; with proper distribution, it should only happen if TOTAL_TX < numProcessableWallets.
     if (txForThisWallet === 0 && TOTAL_TX > 0) {
-        console.log(`Wallet ${i} (${currentWallet.address}) has no transactions assigned, skipping.`);
+        console.log(`Wallet index ${walletIdOriginalIndex} (${currentWallet.address}) has no transactions assigned (txForThisWallet is 0), skipping.`);
         continue;
     }
 
-    // Optional: Stagger start of wallet processing
-    if (INTER_WALLET_START_DELAY_MS > 0 && i > 0) {
-        // console.log(`Delaying start of wallet ${i} by ${INTER_WALLET_START_DELAY_MS * i}ms...`);
-        await delay(INTER_WALLET_START_DELAY_MS * i); // Stagger more for each subsequent wallet
-    }
+    // The cumulative INTER_WALLET_START_DELAY_MS * i block has been removed
+    // to allow "at once" dispatching of the initial transactions.
 
-    promises.push(processWalletTransactions(currentWallet, txForThisWallet, initialNonce, i, provider));
+    promises.push(processWalletTransactions(currentWallet, txForThisWallet, initialNonce, walletIdOriginalIndex, provider));
   }
 
   if (promises.length > 0) {
