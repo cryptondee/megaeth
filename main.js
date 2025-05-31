@@ -14,7 +14,7 @@ const GAS_LIMIT = 90000; // Standard gas limit, adjust if needed
 const RETRY_DELAY_MS = 1000; // 5 seconds delay for retries on "txpool is full"
 const MAX_TRANSACTION_RETRIES = 5; // Max retries for a single transaction
 const INTER_TRANSACTION_DELAY_MS = 10; // Delay within each wallet's transaction sending loop
-const INTER_WALLET_START_DELAY_MS = 0; // Optional: stagger start of wallets slightly
+const INTER_WALLET_START_DELAY_MS = 5; // Optional: stagger start of wallets slightly
 
 async function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
